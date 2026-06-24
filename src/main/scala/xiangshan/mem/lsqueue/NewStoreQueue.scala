@@ -529,6 +529,9 @@ abstract class PhysicalStoreQueueBase(implicit p: Parameters) extends LSQModule 
       val s2LoadMaskEnd      = RegEnable(UIntToMask(MemorySize.CalculateSelectMask(s1LoadStart, s1LoadEnd), VLENB), s1Valid)
       val s2DataInvalidSqIdx = RegEnable(s1DataInvalidSqIdx, s1Valid)
       val s2LoadWaitStrict   = RegEnable(s1LoadWaitStrict, s1Valid)
+      val s2StoreSetHitVec   = RegEnable(s1StoreSetHitVec.asUInt, s1Valid)
+      val s2AgeMask          = RegEnable(s1AgeMaskLow | s1AgeMaskHigh, s1Valid)
+      val s2OverlapMask      = RegEnable(s1OverlapMask, s1Valid)
       val s2WaitStrictSqIdx  = RegEnable(s1LoadSqIdx - 1.U, s1Valid)
       val s2MultiMatch       = RegEnable(s1MultiMatch, s1Valid)
       val s2LoadPaddr        = RegEnable(s1QueryPaddr, s1Valid)
@@ -583,6 +586,9 @@ abstract class PhysicalStoreQueueBase(implicit p: Parameters) extends LSQModule 
         !(s2PaddrMatchVec & s2CanForward & s2SelectOH).orR, // if forward valid, select entry's paddr must match
         (s2PaddrMatchVec & s2CanForward).orR) // if forward invalid, must no paddr match
 
+      val s2MdpCandidate = Mux(s2LoadWaitStrict, s2AgeMask, s2AgeMask & s2StoreSetHitVec)
+      val s2MdpAddrMatch = s2MdpCandidate & s2OverlapMask & s2PaddrMatchVec & addrValidVec.asUInt & allocatedVec.asUInt
+
       val s2SelectData         = (0 until VLENB).map(j =>
         j.U -> rotateByteRight(s2SelectDataEntry.data, j * 8)
       )
@@ -619,6 +625,9 @@ abstract class PhysicalStoreQueueBase(implicit p: Parameters) extends LSQModule 
       s2Resp.bits.dataInvalid.bits  := s2DataInvalidSqIdx
       s2Resp.bits.addrInvalid.valid := Mux(s2LoadWaitStrict, s2StrictMdpWait, s2NeedPreciseMdpWait) // maby can't select a entry
       s2Resp.bits.addrInvalid.bits := Mux(s2LoadWaitStrict, s2WaitStrictSqIdx, s2AddrInvalidSqIdx)
+      s2Resp.bits.mdpAddrValid     := s2Valid && s2MdpCandidate.orR
+      s2Resp.bits.mdpAddrStrict    := s2LoadWaitStrict
+      s2Resp.bits.mdpAddrHit       := s2MdpAddrMatch.orR
       s2Resp.bits.forwardInvalid   := !s2SafeForward || s2CboForwardFail || s2Cross4KPage // do not support cross page forward.
       s2Resp.bits.matchInvalid     := s2PaddrNoMatch && !s2Cross4KPage && s2SafeForward // if cross Page/multi match, let load replay.
       s2Resp.valid                 := s2Valid
