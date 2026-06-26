@@ -128,6 +128,7 @@ object Bundles {
     val perfMdpAddrValid = Bool()
     val perfMdpAddrStrict = Bool()
     val perfMdpAddrHit = Bool()
+    val perfWaitStoreRetired = Bool()
   }
 
   class PerfMdpAddr(implicit p: Parameters) extends XSBundle {
@@ -139,6 +140,7 @@ object Bundles {
     val replayNonStrictMiss = Bool()
     val replayStrictHit = Bool()
     val replayStrictMiss = Bool()
+    val waitStoreRetired = Bool()
   }
 
   class UncacheForwardResp(implicit p: Parameters) extends SbufferForwardResp // ?
