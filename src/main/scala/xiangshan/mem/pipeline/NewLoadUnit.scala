@@ -1540,8 +1540,6 @@ class LoadUnitS3(param: ExeUnitParams)(
 
   // StoreSet ChiselDB trace
   val storeSetLoadUnitCheckHartId = p(XSCoreParamsKey).HartId
-  val isWriteStoreSetLoadUnitCheckTable =
-    Constantin.createRecord(s"isWriteStoreSetLoadUnitCheckTable$storeSetLoadUnitCheckHartId")
   val storeSetLoadUnitCheckTable = ChiselDB.createTable(
     s"StoreSetLoadUnitCheckDB$storeSetLoadUnitCheckHartId",
     new StoreSetLoadUnitCheckDBEntry,
@@ -1565,7 +1563,7 @@ class LoadUnitS3(param: ExeUnitParams)(
   storeSetLoadUnitCheckEntry.storeSqIdxValid := storeSetLoadUnitCheckStoreSqIdxValid
   storeSetLoadUnitCheckTable.log(
     data = storeSetLoadUnitCheckEntry,
-    en = isWriteStoreSetLoadUnitCheckTable.orR && lqWriteValid &&
+    en = lqWriteValid &&
       storeSetLoadUnitCheckUop.storeSetHit && storeSetLoadUnitCheckUop.loadWaitBit,
     site = s"${param.name}_StoreSetLoadUnitCheck$storeSetLoadUnitCheckHartId",
     clock = clock,
