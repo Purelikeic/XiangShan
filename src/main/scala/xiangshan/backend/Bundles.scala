@@ -395,6 +395,7 @@ object Bundles {
   class RegionInUop(val params: IssueBlockParams)(implicit p: Parameters) extends XSBundle {
     def numSrc = params.numSrc
     // from frontend
+    val foldpc     = UInt(MemPredPCWidth.W)
     val isRVC      = Option.when(params.needIsRVC)(Bool())
     val fixedTaken = Option.when(params.needTaken)(Bool())
     val predTaken  = Option.when(params.needTaken)(Bool())
@@ -447,6 +448,7 @@ object Bundles {
     def numSrc = params.numSrc
 
     // from frontend
+    val foldpc     = UInt(MemPredPCWidth.W)
     val isRVC      = Option.when(params.needIsRVC)(Bool())
     val fixedTaken = Option.when(params.needTaken)(Bool())
     val predTaken  = Option.when(params.needTaken)(Bool())
@@ -476,6 +478,7 @@ object Bundles {
   class IssueQueueDeqOg1Payload(val params: ExeUnitParams)(implicit p: Parameters) extends XSBundle {
     def numSrc = params.numSrc
     // from frontend
+    val foldpc     = UInt(MemPredPCWidth.W)
     val isRVC      = Option.when(params.needIsRVC || params.aluNeedPc)(Bool())
     val fixedTaken = Option.when(params.needTaken)(Bool())
     val predTaken  = Option.when(params.needTaken)(Bool())
@@ -962,6 +965,7 @@ object Bundles {
                   val iqParams: IssueBlockParams,
                   val exuParams: ExeUnitParams,
                 )(implicit p: Parameters) extends XSBundle {
+    val foldpc         = UInt(MemPredPCWidth.W)
     val fuType         = FuType()
     val robIdx         = new RobPtr
     val iqIdx          = UInt(log2Up(iqParams.numEntries).W)
@@ -1082,6 +1086,7 @@ object Bundles {
 
   // DataPath --[ExuInput]--> Exu
   class ExuInput(val params: ExeUnitParams, copyWakeupOut:Boolean = false, copyNum:Int = 0, hasCopySrc: Boolean = false)(implicit p: Parameters) extends XSBundle {
+    val foldpc         = UInt(MemPredPCWidth.W)
     val fuType        = FuType()
     val fuOpType      = FuOpType()
     val src           = Vec(params.numRegSrc, UInt(params.srcDataBitsMax.W))
@@ -1179,6 +1184,7 @@ object Bundles {
     def toDynInst(): DynInst = {
       val uop = Wire(new DynInst)
       uop := 0.U.asTypeOf(uop)
+      uop.foldpc         := this.foldpc
       uop.fuType         := this.fuType
       uop.fuOpType       := this.fuOpType
       uop.imm            := this.imm
@@ -1218,6 +1224,7 @@ object Bundles {
   }
 
   class ExuInputCtrlBundle(val params: ExeUnitParams)(implicit p: Parameters) extends XSBundle {
+    val foldpc         = UInt(MemPredPCWidth.W)
     val fuType         = FuType()
     val fuOpType       = FuOpType()
     val is0Lat         = Option.when(params.fuConfigs.map(x => x.latency.latencyVal.getOrElse(1) == 0 && !x.hasNoDataWB).reduce(_ || _))(Bool())
