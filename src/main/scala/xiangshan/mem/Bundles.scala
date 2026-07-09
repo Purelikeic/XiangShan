@@ -141,6 +141,9 @@ object Bundles {
     val replayStrictHit = Bool()
     val replayStrictMiss = Bool()
     val waitStoreRetired = Bool()
+    val perfAtRobHead = Bool()
+    val perfAtLqHead = Bool()
+    val perfLqFull = Bool()
   }
 
   class UncacheForwardResp(implicit p: Parameters) extends SbufferForwardResp // ?
