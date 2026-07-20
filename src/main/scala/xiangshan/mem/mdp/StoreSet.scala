@@ -47,6 +47,7 @@ class SSITEntry(implicit p: Parameters) extends XSBundle {
 class SSITDataEntry(implicit p: Parameters) extends XSBundle {
   val ssid = UInt(SSIDWidth.W) // store set identifier
   val strict = Bool() // strict load wait is needed
+  val strictEpoch = Bool()
 }
 
 // Store Set Identifier Table
@@ -75,6 +76,8 @@ class SSIT(implicit p: Parameters) extends XSModule {
   val SSIT_UPDATE_LOAD_READ_PORT = 0
   val SSIT_UPDATE_STORE_READ_PORT = 1
   val SSIT_READ_PORT_NUM = DecodeWidth
+  val SSIT_STRICT_SCRUB_READ_PORT = DecodeWidth
+  val SSIT_DATA_READ_PORT_NUM = DecodeWidth + 1
 
   // data sram write port allocate
   // load update and flush uses the same write port
@@ -82,6 +85,8 @@ class SSIT(implicit p: Parameters) extends XSModule {
   val SSIT_UPDATE_LOAD_WRITE_PORT = 0
   val SSIT_UPDATE_STORE_WRITE_PORT = 1
   val SSIT_WRITE_PORT_NUM = 2
+  val SSIT_STRICT_SCRUB_WRITE_PORT = 2
+  val SSIT_DATA_WRITE_PORT_NUM = 3
 
   private def hasRen: Boolean = true
   val valid_array = Module(new SyncDataModuleTemplate(
@@ -95,8 +100,8 @@ class SSIT(implicit p: Parameters) extends XSModule {
   val data_array = Module(new SyncDataModuleTemplate(
     new SSITDataEntry,
     SSITSize,
-    SSIT_READ_PORT_NUM,
-    SSIT_WRITE_PORT_NUM,
+    SSIT_DATA_READ_PORT_NUM,
+    SSIT_DATA_WRITE_PORT_NUM,
     hasRen = hasRen,
   ))
 
@@ -105,10 +110,14 @@ class SSIT(implicit p: Parameters) extends XSModule {
     valid_array.io.wen(i) := false.B
     valid_array.io.waddr(i) := 0.U
     valid_array.io.wdata(i) := false.B
+  })
+  (0 until SSIT_DATA_WRITE_PORT_NUM).foreach(i => {
     data_array.io.wen(i) := false.B
     data_array.io.waddr(i) := 0.U
     data_array.io.wdata(i) := 0.U.asTypeOf(new SSITDataEntry)
   })
+  data_array.io.ren.get(SSIT_STRICT_SCRUB_READ_PORT) := false.B
+  data_array.io.raddr(SSIT_STRICT_SCRUB_READ_PORT) := 0.U
 
   val debug_valid = RegInit(VecInit(Seq.fill(SSITSize)(false.B)))
   val debug_ssid = Reg(Vec(SSITSize, UInt(SSIDWidth.W)))
@@ -121,6 +130,7 @@ class SSIT(implicit p: Parameters) extends XSModule {
 
   val resetCounter = RegInit(0.U(ResetTimeMax2Pow.W))
   resetCounter := resetCounter + 1.U
+  val strictEpoch = RegInit(false.B)
 
   for (i <- 0 until DecodeWidth) {
     // io.rdata(i).valid := RegNext(valid(io.raddr(i)))
@@ -136,7 +146,8 @@ class SSIT(implicit p: Parameters) extends XSModule {
     // gen result in rename stage
     io.rdata(i).valid := valid_array.io.rdata(i)
     io.rdata(i).ssid := data_array.io.rdata(i).ssid
-    io.rdata(i).strict := data_array.io.rdata(i).strict
+    io.rdata(i).strict := data_array.io.rdata(i).strict &&
+      data_array.io.rdata(i).strictEpoch === strictEpoch
   }
 
   // flush SSIT
@@ -162,7 +173,7 @@ class SSIT(implicit p: Parameters) extends XSModule {
       valid_array.io.wen(SSIT_MISC_WRITE_PORT) := true.B
       valid_array.io.waddr(SSIT_MISC_WRITE_PORT) := resetStepCounter
       valid_array.io.wdata(SSIT_MISC_WRITE_PORT) := false.B
-      debug_valid(resetStepCounter) := false.B
+      debug_valid(resetStepCounter(log2Ceil(SSITSize) - 1, 0)) := false.B
     }
   }
   XSPerfAccumulate("reset_timeout", state === s_flush && resetCounter === 0.U)
@@ -192,7 +203,8 @@ class SSIT(implicit p: Parameters) extends XSModule {
   // load has already been assigned with a store set
   val s1_loadAssigned = valid_array.io.rdata(SSIT_UPDATE_LOAD_READ_PORT)
   val s1_loadOldSSID = data_array.io.rdata(SSIT_UPDATE_LOAD_READ_PORT).ssid
-  val s1_loadStrict = data_array.io.rdata(SSIT_UPDATE_LOAD_READ_PORT).strict
+  val s1_loadStrict = data_array.io.rdata(SSIT_UPDATE_LOAD_READ_PORT).strict &&
+    data_array.io.rdata(SSIT_UPDATE_LOAD_READ_PORT).strictEpoch === strictEpoch
   // store has already been assigned with a store set
   val s1_storeAssigned = valid_array.io.rdata(SSIT_UPDATE_STORE_READ_PORT)
   val s1_storeOldSSID = data_array.io.rdata(SSIT_UPDATE_STORE_READ_PORT).ssid
@@ -217,6 +229,49 @@ class SSIT(implicit p: Parameters) extends XSModule {
   // but load's store set ID is smaller
   val s2_winnerSSID = Mux(s2_loadOldSSID < s2_storeOldSSID, s2_loadOldSSID, s2_storeOldSSID)
 
+  val strictTrain = s2_mempred_update_req_valid && s2_loadAssigned && s2_storeAssigned && s2_ssidIsSame
+  val strictResetCycles = 8192
+  val strictResetCounter = RegInit(0.U(log2Ceil(strictResetCycles).W))
+  val strictResetCounterActive = RegInit(false.B)
+  val strictClearTrigger = strictResetCounterActive && strictResetCounter === (strictResetCycles - 1).U
+
+  when(strictClearTrigger) {
+    strictEpoch := ~strictEpoch
+    strictResetCounter := 0.U
+    strictResetCounterActive := strictTrain
+  }.elsewhen(strictResetCounterActive) {
+    strictResetCounter := strictResetCounter + 1.U
+  }.elsewhen(strictTrain) {
+    strictResetCounter := 0.U
+    strictResetCounterActive := true.B
+  }
+
+  val strictEpochForWrite = Mux(strictClearTrigger, ~strictEpoch, strictEpoch)
+
+  // Epoch invalidation clears predictions immediately; scrub prevents stale strict bits from reviving on epoch wrap.
+  val strictScrubActive = RegInit(false.B)
+  val strictScrubReadIndex = RegInit(0.U(log2Ceil(SSITSize).W))
+  XSError(strictClearTrigger && strictScrubActive, "SSIT strict scrub must finish before the next clear\n")
+  when(strictClearTrigger) {
+    strictScrubActive := true.B
+    strictScrubReadIndex := 0.U
+    debug_strict.foreach(_ := false.B)
+  }.elsewhen(strictScrubActive) {
+    when(strictScrubReadIndex === (SSITSize - 1).U) {
+      strictScrubActive := false.B
+      strictScrubReadIndex := 0.U
+    }.otherwise {
+      strictScrubReadIndex := strictScrubReadIndex + 1.U
+    }
+  }
+
+  data_array.io.ren.get(SSIT_STRICT_SCRUB_READ_PORT) := strictScrubActive
+  data_array.io.raddr(SSIT_STRICT_SCRUB_READ_PORT) := strictScrubReadIndex
+
+  val strictScrubWriteValid = RegNext(strictScrubActive, false.B)
+  val strictScrubWriteIndex = RegEnable(strictScrubReadIndex, strictScrubActive)
+  val strictScrubReadData = data_array.io.rdata(SSIT_STRICT_SCRUB_READ_PORT)
+
   def update_ld_ssit_entry(pc: UInt, valid: Bool, ssid: UInt, strict: Bool) = {
     valid_array.io.wen(SSIT_UPDATE_LOAD_WRITE_PORT) := true.B
     valid_array.io.waddr(SSIT_UPDATE_LOAD_WRITE_PORT) := pc
@@ -225,6 +280,7 @@ class SSIT(implicit p: Parameters) extends XSModule {
     data_array.io.waddr(SSIT_UPDATE_LOAD_WRITE_PORT) := pc
     data_array.io.wdata(SSIT_UPDATE_LOAD_WRITE_PORT).ssid := ssid
     data_array.io.wdata(SSIT_UPDATE_LOAD_WRITE_PORT).strict := strict
+    data_array.io.wdata(SSIT_UPDATE_LOAD_WRITE_PORT).strictEpoch := strictEpochForWrite
     debug_valid(pc) := valid
     debug_ssid(pc) := ssid
     debug_strict(pc) := strict
@@ -238,6 +294,7 @@ class SSIT(implicit p: Parameters) extends XSModule {
     data_array.io.waddr(SSIT_UPDATE_STORE_WRITE_PORT) := pc
     data_array.io.wdata(SSIT_UPDATE_STORE_WRITE_PORT).ssid := ssid
     data_array.io.wdata(SSIT_UPDATE_STORE_WRITE_PORT).strict := strict
+    data_array.io.wdata(SSIT_UPDATE_STORE_WRITE_PORT).strictEpoch := strictEpochForWrite
     debug_valid(pc) := valid
     debug_ssid(pc) := ssid
     debug_strict(pc) := strict
@@ -314,6 +371,18 @@ class SSIT(implicit p: Parameters) extends XSModule {
     data_array.io.wen(SSIT_UPDATE_STORE_WRITE_PORT) := false.B
   }
 
+  val strictScrubWriteConflict = (0 until SSIT_WRITE_PORT_NUM).map(i =>
+    data_array.io.wen(i) && data_array.io.waddr(i) === strictScrubWriteIndex
+  ).reduce(_ || _)
+  val strictScrubWriteEnable = strictScrubWriteValid &&
+    strictScrubReadData.strictEpoch =/= strictEpoch && !strictScrubWriteConflict
+
+  data_array.io.wen(SSIT_STRICT_SCRUB_WRITE_PORT) := strictScrubWriteEnable
+  data_array.io.waddr(SSIT_STRICT_SCRUB_WRITE_PORT) := strictScrubWriteIndex
+  data_array.io.wdata(SSIT_STRICT_SCRUB_WRITE_PORT) := strictScrubReadData
+  data_array.io.wdata(SSIT_STRICT_SCRUB_WRITE_PORT).strict := false.B
+  data_array.io.wdata(SSIT_STRICT_SCRUB_WRITE_PORT).strictEpoch := strictEpoch
+
   // StoreSet ChiselDB trace
   val storeSetUpdateHartId = p(XSCoreParamsKey).HartId
   val storeSetUpdateTable = ChiselDB.createTable(s"StoreSetUpdateDB$storeSetUpdateHartId", new StoreSetUpdateDBEntry, basicDB = true)
@@ -369,6 +438,7 @@ class SSIT(implicit p: Parameters) extends XSModule {
   XSPerfAccumulate("ssit_update_strict_failed",
     s2_mempred_update_req_valid && s2_ssidIsSame && s2_loadStrict && s2_loadAssigned && s2_storeAssigned
   ) // should be zero
+  XSPerfAccumulate("ssit_strict_clear", strictClearTrigger)
 
   val pred_dependence = io.ren.zip(io.rdata).map{case (v, rdata) =>
     RegNext(v) && rdata.valid
