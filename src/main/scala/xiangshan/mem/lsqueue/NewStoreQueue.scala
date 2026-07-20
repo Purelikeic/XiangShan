@@ -625,21 +625,15 @@ abstract class PhysicalStoreQueueBase(implicit p: Parameters) extends LSQModule 
       s2Resp.valid                 := s2Valid
 
       // Perf-only response fields
-      val perfS0HasWaitStore = lfstEnable && s0Req.bits.loadWaitBit
-      val perfS0WaitStoreHitVec = VecInit((0 until StoreQueueSize).map(j =>
-        perfS0HasWaitStore && io.dataEntriesIn(j).uop.robIdx === s0Req.bits.waitForRobIdx)).asUInt
-
-      val perfS1WaitStoreHitVec = RegEnable(perfS0WaitStoreHitVec, s0Valid)
-      val perfS1HasWaitStore = RegEnable(perfS0HasWaitStore, s0Valid)
-      val perfS1WaitStoreRetired = s1Valid && perfS1HasWaitStore &&
-        !(perfS1WaitStoreHitVec & allocatedVec.asUInt).orR
-
+      val perfS1HasWaitStore = RegEnable(s0Req.bits.loadWaitBit, s0Valid)
+      val perfS2HasWaitStore = RegEnable(perfS1HasWaitStore, s1Valid)
       val s2AgeMask = RegEnable(s1AgeMaskLow | s1AgeMaskHigh, s1Valid)
-      val s2StoreSetHitVec = RegEnable(s1StoreSetHitVec.asUInt, s1Valid)
-      val perfS2WaitStoreRetired = RegEnable(perfS1WaitStoreRetired, s1Valid)
-      val perfS2MdpCandidate = Mux(s2LoadWaitStrict, s2AgeMask, s2AgeMask & s2StoreSetHitVec)
+      val perfS2WaitStoreRetired = perfS2HasWaitStore && !s2MdpQueryRespValid
+      val perfS2MdpHitVec = VecInit((0 until StoreQueuePhysicalSize).map(j =>
+        s2MdpQueryRespValid && !s2MdpHitOutOfRange && s2AddrInvalidSqIdx.value === j.U)).asUInt
+      val perfS2MdpCandidate = Mux(s2LoadWaitStrict, s2AgeMask, s2AgeMask & perfS2MdpHitVec)
       val perfS2MdpSelectedAddrMatch = (perfS2MdpCandidate & s2OverlapMask & s2PaddrMatchVec &
-        addrValidVec.asUInt & allocatedVec.asUInt & s2SelectOH).orR
+        addrValidVec.asUInt & s2SelectOH).orR
       val perfS2MdpForwardMaskMatch = s2ForwardValid && s2FinalMask.orR
 
       s2Resp.bits.perfMdpAddrValid  := s2Valid && perfS2MdpCandidate.orR
