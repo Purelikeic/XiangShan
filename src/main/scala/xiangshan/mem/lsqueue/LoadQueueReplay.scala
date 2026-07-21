@@ -22,6 +22,7 @@ import utility._
 import xiangshan._
 import xiangshan.ExceptionNO._
 import xiangshan.backend.Bundles.{DynInst, ExuOutput, MemExuOutput, IssueQueueLRQWakeUpBundle}
+import xiangshan.backend.rob.RobPtr
 import xiangshan.mem.Bundles._
 import xiangshan.cache._
 import xiangshan.cache.wpu.ReplayCarry
@@ -70,6 +71,27 @@ object LoadReplayCauses {
   val C_MF  = 12
   // total causes
   val allCauses = 13
+
+  private val perfCauseNameMap = Seq(
+    C_UNCACHE -> "uncache",
+    C_SMF -> "storeQueue_multi_match",
+    C_MA -> "mem_amb",
+    C_TM -> "tlb_miss",
+    C_FF -> "forward_fail",
+    C_DR -> "dcache_replay",
+    C_DM -> "dcache_miss",
+    C_WF -> "wpu_fail",
+    C_BC -> "bank_conflict",
+    C_RAR -> "rar_nack",
+    C_RAW -> "raw_nack",
+    C_NK -> "nuke",
+    C_MF -> "misalign_buffer_full"
+  )
+  require(perfCauseNameMap.map(_._1).distinct.size == allCauses)
+  require(perfCauseNameMap.map(_._1).sorted == (0 until allCauses))
+  require(perfCauseNameMap.map(_._2).distinct.size == allCauses)
+
+  val perfCauseNames: Seq[String] = perfCauseNameMap.sortBy(_._1).map(_._2)
 }
 
 class VecReplayInfo(implicit p: Parameters) extends XSBundle with HasVLSUParameters {
@@ -197,6 +219,7 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   val io = IO(new Bundle() {
     // control
     val redirect = Flipped(ValidIO(new Redirect))
+    val robHeadPtr = Input(new RobPtr)
     val vecFeedback = Vec(VecLoadPipelineWidth, Flipped(ValidIO(new FeedbackToLsqIO)))
 
     // from load unit s3
@@ -917,6 +940,40 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   val perfValidCount = RegNext(PopCount(allocated))
 
   //  perf cnt
+  val normalRelease = VecInit(io.enq.zipWithIndex.map { case (enq, w) =>
+    val schedIndex = enq.bits.schedIndex
+    enq.fire && !cancelEnq(w) && enq.bits.isLoadReplay && !needReplay(w) && allocated(schedIndex)
+  })
+  val scalarRobHeadRelease = VecInit(io.enq.zipWithIndex.map { case (enq, w) =>
+    val schedIndex = enq.bits.schedIndex
+    normalRelease(w) && !vecReplay(schedIndex).isvec && uop(schedIndex).robIdx === io.robHeadPtr
+  })
+  val robHeadReleaseCauseEvents = (0 until LoadReplayCauses.allCauses).map { causeIdx =>
+    VecInit(io.enq.zipWithIndex.map { case (enq, w) =>
+      val schedIndex = enq.bits.schedIndex
+      scalarRobHeadRelease(w) && cause(schedIndex)(causeIdx)
+    })
+  }
+  val robHeadReleaseCauseCounts = robHeadReleaseCauseEvents.map(PopCount(_))
+
+  io.enq.zipWithIndex.foreach { case (enq, w) =>
+    val schedIndex = enq.bits.schedIndex
+    when (normalRelease(w)) {
+      assert(PopCount(cause(schedIndex)) === 1.U, "released replay entry cause must be one-hot")
+    }
+  }
+  for (i <- 0 until LoadPipelineWidth; j <- i + 1 until LoadPipelineWidth) {
+    assert(!(normalRelease(i) && normalRelease(j) &&
+      io.enq(i).bits.schedIndex === io.enq(j).bits.schedIndex),
+      "a replay entry must not be released by multiple ports")
+  }
+  assert(robHeadReleaseCauseCounts.reduce(_ +& _) === PopCount(scalarRobHeadRelease),
+    "replay cause increments must equal scalar ROB-head releases")
+
+  LoadReplayCauses.perfCauseNames.zip(robHeadReleaseCauseCounts).foreach { case (causeName, count) =>
+    XSPerfAccumulate(s"replay_${causeName}_scalar_release_rob_head", count)
+  }
+
   val enqNumber               = PopCount(io.enq.map(enq => enq.fire && !enq.bits.isLoadReplay))
   val deqNumber               = PopCount(io.replay.map(_.fire))
   val deqBlockCount           = PopCount(io.replay.map(r => r.valid && !r.ready))
