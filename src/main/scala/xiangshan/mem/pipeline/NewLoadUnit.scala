@@ -845,6 +845,8 @@ class LoadUnitS2(param: ExeUnitParams)(
 
     val uncacheBypassResp = Flipped(ValidIO(new UncacheBypassRespS2))
 
+    val stdDataWrite = Input(new StdDataWriteWindow(StdCnt))
+
     // Nuke query from StoreUnit
     val staNukeQueryReq = Flipped(Vec(StorePipelineWidth, ValidIO(new StoreNukeQueryReq)))
     // Nuke query to LQRAR / LQRAW
@@ -1039,14 +1041,6 @@ class LoadUnitS2(param: ExeUnitParams)(
   val troubleMaker = !isPrefetch && !alwaysWriteback
   // 1.3 fast replay
   val cause = Wire(in.cause.get.cloneType)
-  val fastReplayMSHRNack = cause(C_DR) && !hasHigherPriorityCauses(cause, C_DR)
-  val fastReplayBankConflict = cause(C_BC) && !hasHigherPriorityCauses(cause, C_BC)
-  // if store pipeline is waiting for store, send this load to fast replay
-  val fastReplayNuke = cause(C_NK) &&  // TODO: use C_RAR or C_NK?
-    !hasHigherPriorityCauses(VecInit(cause.patch(C_MA, Seq(cause(C_MA) && !fastReplayNukeFirst), 1)), C_RAR)
-  val fastReplay = !LoadEntrance.isFastReplay(entrance) && // 1.3.1
-    (fastReplayMSHRNack || fastReplayBankConflict || fastReplayNuke) && // 1.3.2
-    !isUnalign && !tlbMiss // 1.3.3, if tlb miss, should not to fast replay
 
   /**
     * Nuke query to LQRAR / LQRAW
@@ -1093,6 +1087,25 @@ class LoadUnitS2(param: ExeUnitParams)(
   cause(C_NK) := troubleMaker && nuke
   cause(C_MF) := false.B
   cause(C_SMF) := troubleMaker && forwardInvalid
+
+  val stdDataWriteCurrentMatch = VecInit(io.stdDataWrite.current.map { write =>
+    write.valid && write.bits === sqDataInvalidSqIdx
+  }).asUInt.orR
+  val stdDataWritePreviousMatch = VecInit(io.stdDataWrite.previous.map { write =>
+    write.valid && write.bits === sqDataInvalidSqIdx
+  }).asUInt.orR
+  val ffStdDataWriteMatch = stdDataWriteCurrentMatch || stdDataWritePreviousMatch
+
+  val fastReplayMSHRNack = cause(C_DR) && !hasHigherPriorityCauses(cause, C_DR)
+  val fastReplayBankConflict = cause(C_BC) && !hasHigherPriorityCauses(cause, C_BC)
+  // if store pipeline is waiting for store, send this load to fast replay
+  val fastReplayNuke = cause(C_NK) &&  // TODO: use C_RAR or C_NK?
+    !hasHigherPriorityCauses(VecInit(cause.patch(C_MA, Seq(cause(C_MA) && !fastReplayNukeFirst), 1)), C_RAR)
+  val fastReplayForwardFail = cause(C_FF) &&
+    !hasHigherPriorityCauses(cause, C_FF) && ffStdDataWriteMatch
+  val fastReplay = !LoadEntrance.isFastReplay(entrance) && // 1.3.1
+    (fastReplayMSHRNack || fastReplayBankConflict || fastReplayNuke || fastReplayForwardFail) && // 1.3.2
+    !isUnalign && !tlbMiss // 1.3.3, if tlb miss, should not to fast replay
 
   def hasHigherPriorityCauses(cause: Vec[Bool], index: Int): Bool = {
     if (index == 0) false.B
@@ -1195,8 +1208,11 @@ class LoadUnitS2(param: ExeUnitParams)(
    *  Perf counters
    */
   val fire = pipeIn.fire && !kill
+  val ffFastReplayInitiate = fire && fastReplayForwardFail &&
+    !LoadEntrance.isFastReplay(entrance) && !isUnalign && !tlbMiss && !exception
   XSPerfAccumulate("valid", pipeIn.valid)
   XSPerfAccumulate("fire", fire)
+  XSPerfAccumulate("forward_fail_fast_replay_initiate", ffFastReplayInitiate)
   XSPerfAccumulate("fire_first_issue", fire && in.isFirstIssue())
   XSPerfAccumulate("dcache_miss", fire && io.dcacheResp.bits.miss)
   XSPerfAccumulate("dcache_miss_first_issue", fire && io.dcacheResp.bits.miss && in.isFirstIssue())
@@ -1874,6 +1890,7 @@ class LoadUnitIO(val param: ExeUnitParams)(implicit p: Parameters) extends XSBun
   val topDownInfo = Output(new LsTopdownInfo)
   // ROB-head source execute-fail events for MemBlock aggregation
   val sourceExecuteFailRobHead = Output(LoadEntrance())
+  val stdDataWrite = Input(new StdDataWriteWindow(backendParams.StdCnt))
 }
 
 class NewLoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModule with HasPerfEvents {
@@ -1966,6 +1983,7 @@ class NewLoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   io.prefetchTrain.valid := GatedValidRegNext(s2.io.prefetchTrain.valid)
   io.prefetchTrain.bits := RegEnable(s2.io.prefetchTrain.bits, s2.io.prefetchTrain.valid)
   s2.io.csrCtrl := io.csrCtrl
+  s2.io.stdDataWrite := io.stdDataWrite
 
   // S3
   s3.io.redirect := io.redirect

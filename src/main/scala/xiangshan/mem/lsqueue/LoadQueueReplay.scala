@@ -233,6 +233,9 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     val storeDataWakeup = Vec(StorePipelineWidth, Flipped(ValidIO(new IssueQueueLRQWakeUpBundle)))
     val storeDataWakeupCancel = Vec(StorePipelineWidth, Input(new LRQWakeUpCancelBundle))
 
+    // actual store data writes accepted by StoreQueue
+    val storeDataWrite = Vec(StorePipelineWidth, Flipped(ValidIO(new SqPtr)))
+
     // queue-based replay
     val replay = Vec(LoadPipelineWidth, Decoupled(new LoadReplayIO))
 
@@ -736,6 +739,7 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
       newEnq := needEnq && !enq.bits.isLoadReplay
   }
 
+  val ffEnqNonblocking = Wire(Vec(LoadPipelineWidth, Bool()))
   for ((enq, w) <- io.enq.zipWithIndex) {
     vaddrModule.io.wen(w) := false.B
     freeList.io.doAllocate(w) := false.B
@@ -760,6 +764,16 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     val isFF = replayInfo.cause(LoadReplayCauses.C_FF)
     val isRAW = replayInfo.cause(LoadReplayCauses.C_RAW)
     val isSMF = replayInfo.cause(LoadReplayCauses.C_SMF)
+    val ffWaitSqIdx = replayInfo.data_inv_sq_idx
+    val ffWakeupMatch = VecInit(io.storeDataWakeup.map { wakeup =>
+      wakeup.valid && wakeup.bits.sqIdx === ffWaitSqIdx
+    }).asUInt.orR
+    val ffStoreWriteMatch = VecInit(io.storeDataWrite.map { write =>
+      write.valid && write.bits === ffWaitSqIdx
+    }).asUInt.orR
+    val ffProducerReadyNow = ffWakeupMatch || ffStoreWriteMatch
+    val ffEnqAccepted = enqFireBase && replayInfo.need_rep && isFF
+    ffEnqNonblocking(w) := ffEnqAccepted && ffProducerReadyNow
     val nextBlockSqIdx = Mux(isMA, replayInfo.addr_inv_sq_idx,
     Mux(isFF, replayInfo.data_inv_sq_idx, enq.bits.uop.sqIdx))
 
@@ -837,6 +851,10 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
         blocking(enqIndex) := !replayInfo.full_fwd && //  dcache miss
                               !(io.loadWakeup.valid && io.loadWakeup.bits.mshrId === replayInfo.mshr_id) && // no refill in this cycle
                               !(RegNext(io.loadWakeup.valid) && RegNext(io.loadWakeup.bits.mshrId) === replayInfo.mshr_id) // no refill in last cycle
+      }
+
+      when (isFF) {
+        blocking(enqIndex) := !ffProducerReadyNow
       }
 
       // extra info
@@ -987,6 +1005,7 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   val replayForwardFailCount  = PopCount(io.enq.map(enq => enq.fire && !enq.bits.isLoadReplay && enq.bits.rep_info.cause(LoadReplayCauses.C_FF)))
   val replayDCacheMissCount   = PopCount(io.enq.map(enq => enq.fire && !enq.bits.isLoadReplay && enq.bits.rep_info.cause(LoadReplayCauses.C_DM)))
   val replayMultiMatchCount   = PopCount(io.enq.map(enq => enq.fire && !enq.bits.isLoadReplay && enq.bits.rep_info.cause(LoadReplayCauses.C_SMF)))
+  val replayForwardFailEnqNonblockingCount = PopCount(ffEnqNonblocking)
   val replayStoreAddrWakeupCancelCount = PopCount(storeAddrWakeupCancelVec)
   val replayStoreDataWakeupCancelCount = PopCount(storeDataWakeupCancelVec)
   def storeIssueScoreBoardDelay3(idx: UInt): Bool = {
@@ -1014,6 +1033,7 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   XSPerfAccumulate("replay_bank_conflict", replayBankConflictCount)
   XSPerfAccumulate("replay_dcache_replay", replayDCacheReplayCount)
   XSPerfAccumulate("replay_forward_fail", replayForwardFailCount)
+  XSPerfAccumulate("replay_forward_fail_enq_nonblocking", replayForwardFailEnqNonblockingCount)
   XSPerfAccumulate("replay_dcache_miss", replayDCacheMissCount)
   XSPerfAccumulate("replay_hint_wakeup", s0_hintSelValid)
   XSPerfAccumulate("replay_hint_priority_beat1", io.l2_hint.valid && io.l2_hint.bits.isKeyword)
