@@ -766,7 +766,8 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     if(StoreSetEnable) {
       fromRenameUpdate(i).bits.loadWaitBit := io.lfst.resp(i).bits.shouldWait
       fromRenameUpdate(i).bits.waitForRobIdx := io.lfst.resp(i).bits.robIdx
-      fromRenameUpdate(i).bits.loadWaitStrict := fromRename(i).bits.loadWaitStrict && io.lfst.resp(i).bits.shouldWait
+      fromRenameUpdate(i).bits.loadWaitStrict := fromRename(i).bits.loadWaitStrict &&
+        io.lfst.resp(i).bits.shouldWait && io.lfst.resp(i).bits.strictShouldWait
     } else {
       fromRenameUpdate(i).bits.loadWaitBit := isLs(i) && !isStore(i) && fromRename(i).bits.loadWaitBit
     }
@@ -824,7 +825,8 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     fromRename(i).fire && fromRenameUpdate(i).bits.loadWaitBit && !isStore(i) && isLs(i)
   )))
   XSPerfAccumulate("storeset_load_strict_wait", PopCount((0 until RenameWidth).map(i =>
-    fromRename(i).fire && fromRenameUpdate(i).bits.loadWaitBit && updatedUop(i).loadWaitStrict && !isStore(i) && isLs(i)
+    fromRename(i).fire && fromRenameUpdate(i).bits.loadWaitBit &&
+      fromRenameUpdate(i).bits.loadWaitStrict && !isStore(i) && isLs(i)
   )))
   XSPerfAccumulate("storeset_store_wait", PopCount((0 until RenameWidth).map(i =>
     fromRename(i).fire && fromRenameUpdate(i).bits.loadWaitBit && isStore(i)
