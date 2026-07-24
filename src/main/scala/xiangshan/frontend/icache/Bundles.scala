@@ -251,6 +251,7 @@ class MainPipeToWayLookupBundle(implicit p: Parameters) extends ICacheBundle {
 class PrefetchReqBundle(implicit p: Parameters) extends ICacheBundle {
   val startVAddr:       PrunedAddr    = PrunedAddr(VAddrBits)
   val nextLineVAddr:    PrunedAddr    = PrunedAddr(VAddrBits)
+  val vSetIdx:          Vec[UInt]     = Vec(PortNumber, UInt(idxBits.W))
   val isCrossLine:      Bool          = Bool()
   val ftqIdx:           FtqPtr        = new FtqPtr
   val backendException: ExceptionType = new ExceptionType
