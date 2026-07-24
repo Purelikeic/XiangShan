@@ -332,6 +332,8 @@ class Ifu(implicit p: Parameters) extends IfuModule
       s1_alignedInstrVec(i).endOffset        := 0.U
     }
   }
+  // To facilitate compilation optimization and reduce the generation of redundant data.
+  s1_alignedInstrVec(IBufferEnqueueWidth - 1) := 0.U.asTypeOf(new Instruction)
 
   private val s1_alignedFoldPc =
     VecInit(s1_alignedInstrPcVec.map(i => XORFold(i(VAddrBits - 1, 1), MemPredPCWidth)))
